@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meeting Summarizer</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1c2128; --muted:#6b7280; --line:#e3e6ea; --accent:#2563eb; --danger:#dc2626; --ok:#16a34a; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f1318; --card:#181d24; --text:#e6e9ee; --muted:#9aa4b2; --line:#2a313b; --accent:#5b8def; --danger:#f0605d; --ok:#4cc27d; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.55 system-ui,Segoe UI,sans-serif; }
+  .wrap { max-width:1000px; margin:0 auto; padding:24px 16px; display:grid; gap:16px; grid-template-columns:300px 1fr; }
+  @media (max-width:760px){ .wrap{ grid-template-columns:1fr; } }
+  h1 { font-size:20px; margin:0 0 4px; } h2 { font-size:16px; margin:20px 0 6px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .top { grid-column:1/-1; }
+  button { font:inherit; border:1px solid var(--line); background:var(--card); color:var(--text); padding:8px 14px; border-radius:8px; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.stop { background:var(--danger); color:#fff; border-color:var(--danger); }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  .timer { font:600 22px ui-monospace,Consolas,monospace; }
+  .meter { flex:1; min-width:120px; height:8px; background:var(--line); border-radius:4px; overflow:hidden; }
+  .meter > i { display:block; height:100%; width:0; background:var(--ok); transition:width .2s; }
+  .muted { color:var(--muted); font-size:13px; }
+  .warn { color:var(--danger); font-size:13px; margin-top:8px; }
+  .list { display:grid; gap:6px; align-content:start; max-height:70vh; overflow:auto; }
+  .item { padding:10px; border:1px solid var(--line); border-radius:8px; cursor:pointer; }
+  .item.sel { border-color:var(--accent); }
+  .badge { font-size:11px; padding:1px 7px; border-radius:99px; background:var(--line); }
+  .badge.done { background:color-mix(in srgb,var(--ok) 25%,transparent); }
+  .badge.error, .badge.interrupted { background:color-mix(in srgb,var(--danger) 25%,transparent); }
+  .md li { margin:2px 0; } .md h2 { border-bottom:1px solid var(--line); padding-bottom:4px; }
+  .seg { display:flex; gap:10px; padding:2px 0; } .seg time { color:var(--muted); font:12px ui-monospace,Consolas,monospace; flex:none; padding-top:3px; }
+  input.title { font:600 18px system-ui; background:transparent; color:var(--text); border:1px solid transparent; border-radius:6px; padding:2px 6px; width:100%; }
+  input.title:hover, input.title:focus { border-color:var(--line); outline:none; }
+  details summary { cursor:pointer; color:var(--muted); margin-top:16px; }
+  .tabs { display:flex; gap:6px; flex-wrap:wrap; margin:8px 0; }
+  .tab { font-size:13px; padding:4px 10px; border-radius:99px; }
+  .tab.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  textarea, input.q { width:100%; font:inherit; background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:8px; padding:8px; }
+  textarea { resize:vertical; min-height:56px; }
+  .box { border:1px solid var(--line); border-radius:10px; padding:12px; margin-top:12px; }
+  .box h3 { margin:0 0 8px; font-size:14px; }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px; }
+  .qa { margin-top:10px; } .qa .a { background:var(--bg); border-radius:8px; padding:8px 10px; margin:4px 0 10px; white-space:pre-wrap; }
+  .spin { opacity:.6; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card top">
+    <h1>Meeting Summarizer</h1>
+    <div class="row">
+      <button id="btn" class="primary">● Mulai Rekam</button>
+      <span class="timer" id="timer">00:00:00</span>
+      <div class="meter"><i id="level"></i></div>
+      <span class="muted" id="state">Siap</span>
+    </div>
+    <div class="warn" id="warn"></div>
+    <div class="muted" style="margin-top:6px">Beri tahu peserta bahwa meeting direkam. Pastikan suara meeting keluar lewat speaker/headset PC ini.</div>
+  </div>
+
+  <div class="card"><div class="list" id="list"></div></div>
+  <div class="card" id="detail"><span class="muted">Pilih meeting di sebelah kiri.</span></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let selected = null, recording = false, lastDetailKey = '';
+
+const api = async (url, opt) => {
+  const r = await fetch(url, opt);
+  if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail || m; } catch {} throw new Error(m); }
+  return r.json();
+};
+const esc = s => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const hms = s => { s = Math.floor(s); return [s/3600|0, (s%3600)/60|0, s%60].map(n => String(n).padStart(2,'0')).join(':'); };
+const STATUS = {recording:'Merekam', queued:'Antre', transcribing:'Transkripsi', summarizing:'Meringkas', done:'Selesai', error:'Error', interrupted:'Terputus'};
+
+function md(src) {
+  const inline = t => esc(t).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+  let html = '', inList = false;
+  for (const line of src.split('\n')) {
+    const li = line.match(/^\s*[-*]\s+(.*)/);
+    if (li) { if (!inList) { html += '<ul>'; inList = true; } html += '<li>' + inline(li[1]) + '</li>'; continue; }
+    if (inList) { html += '</ul>'; inList = false; }
+    const h = line.match(/^#{1,3}\s+(.*)/);
+    if (h) html += '<h2>' + inline(h[1]) + '</h2>';
+    else if (line.trim()) html += '<p>' + inline(line) + '</p>';
+  }
+  return html + (inList ? '</ul>' : '');
+}
+
+$('btn').onclick = async () => {
+  $('btn').disabled = true;
+  try {
+    if (recording) { const r = await api('/api/stop', {method:'POST'}); selected = r.id; }
+    else { const r = await api('/api/start', {method:'POST'}); selected = r.id; $('warn').textContent = r.warnings.join(' | '); }
+  } catch (e) { alert(e.message); }
+  $('btn').disabled = false;
+  poll();
+};
+
+async function poll() {
+  try {
+    const s = await api('/api/status');
+    recording = s.recording;
+    $('btn').textContent = recording ? '■ Stop & Ringkas' : '● Mulai Rekam';
+    $('btn').className = recording ? 'stop' : 'primary';
+    $('timer').textContent = hms(s.elapsed);
+    $('level').style.width = Math.min(100, s.level * 400) + '%';
+    $('state').textContent = recording ? 'Merekam…' : (s.processing ? 'Memproses meeting…' : 'Siap');
+    $('warn').textContent = recording ? s.warnings.join(' | ') : (s.api_key_set ? '' : 'GEMINI_API_KEY belum diisi di .env — ringkasan tidak akan jalan.');
+    renderList(await api('/api/meetings'));
+    if (selected) renderDetail(await api('/api/meetings/' + selected));
+  } catch (e) { $('state').textContent = 'Server tidak terhubung'; }
+}
+
+let lastListKey = '';
+function renderList(items) {
+  const lk = JSON.stringify([selected, items.map(m => [m.id, m.title, m.status, m.duration, Math.round(m.progress * 100)])]);
+  if (lk === lastListKey) return;
+  lastListKey = lk;
+  $('list').innerHTML = items.length ? '' : '<span class="muted">Belum ada meeting.</span>';
+  for (const m of items) {
+    const d = document.createElement('div');
+    d.className = 'item' + (m.id === selected ? ' sel' : '');
+    const pct = m.status === 'transcribing' ? (m.progress > 0 ? ` ${Math.round(m.progress*100)}%` : ' (menyiapkan model…)') : '';
+    d.innerHTML = `<div>${esc(m.title)}</div><div class="muted">${hms(m.duration)} · <span class="badge ${m.status}">${STATUS[m.status]||m.status}${pct}</span></div>`;
+    d.onclick = () => { selected = m.id; lastDetailKey = ''; poll(); };
+    $('list').appendChild(d);
+  }
+}
+
+let templates = [], sel = {}, qa = {}, busyAction = '';
+api('/api/templates').then(t => templates = t).catch(() => {});
+
+function renderDetail(m) {
+  const cur = m.summaries.find(x => x.id === sel[m.id]) || m.summaries[m.summaries.length - 1];
+  const key = JSON.stringify([m.id, m.status, m.title, m.summaries.map(x => x.id), cur && cur.id, m.transcript.length, m.error, (qa[m.id] || []).length, busyAction, templates.length]);
+  if (key === lastDetailKey) return;
+  const ae = document.activeElement;
+  if (ae && $('detail').contains(ae) && /^(INPUT|TEXTAREA)$/.test(ae.tagName)) return;
+  lastDetailKey = key;
+  const busy = ['recording','queued','transcribing','summarizing'].includes(m.status);
+  const canAI = m.transcript.length > 0 && !busy;
+  const off = busyAction ? 'disabled' : '';
+  $('detail').innerHTML = `
+    <input class="title" value="${esc(m.title)}">
+    <div class="muted">${m.started_at.replace('T',' ')} · ${hms(m.duration)} · ${STATUS[m.status]||m.status}</div>
+    ${m.error ? `<div class="warn">${esc(m.error)}</div>` : ''}
+    <div class="row" style="margin:10px 0">
+      <button id="copy" ${cur ? '' : 'disabled'}>Salin</button>
+      <a href="/api/meetings/${m.id}/download${cur ? '?sid=' + cur.id : ''}"><button ${cur ? '' : 'disabled'}>Unduh .md</button></a>
+      <button id="retry" ${busy ? 'disabled' : ''}>Proses Ulang</button>
+      <button id="delver" ${cur && m.summaries.length > 1 ? '' : 'disabled'}>Hapus versi ini</button>
+      <button id="del" ${m.status === 'recording' ? 'disabled' : ''}>Hapus meeting</button>
+    </div>
+    ${m.summaries.length ? `<div class="tabs">${m.summaries.map((x, i) =>
+      `<button class="tab ${cur && x.id === cur.id ? 'on' : ''}" data-sid="${x.id}" title="${esc(x.instruction || '')}">v${i+1} · ${esc(x.label)}</button>`).join('')}</div>` : ''}
+    ${cur ? `<div class="muted">${cur.created.replace('T',' ')}${cur.instruction ? ' · instruksi: ' + esc(cur.instruction) : ''}</div><div class="md">${md(cur.text)}</div>`
+          : (busy ? '<p class="muted">Sedang diproses, halaman diperbarui otomatis…</p>' : '')}
+
+    <div class="box ${busyAction === 'sum' ? 'spin' : ''}">
+      <h3>Ringkas ulang meeting ini</h3>
+      <div class="chips">${templates.map(t => `<button class="tpl" data-k="${t.key}" ${canAI ? off : 'disabled'}>${esc(t.label)}</button>`).join('')}</div>
+      <textarea id="instr" placeholder="Instruksi tambahan (opsional), mis. 'fokus ke budget', 'versi 5 kalimat untuk atasan', 'tulis dalam bahasa Inggris'" ${canAI ? '' : 'disabled'}></textarea>
+      <div class="muted" style="margin-top:4px">${busyAction === 'sum' ? 'Meringkas…' : 'Klik template untuk membuat versi baru. Instruksi di atas ikut dipakai.'}</div>
+    </div>
+
+    <div class="box ${busyAction === 'ask' ? 'spin' : ''}">
+      <h3>Tanya isi meeting</h3>
+      <div class="row"><input class="q" id="q" placeholder="mis. Siapa yang bertanggung jawab atas budget iklan?" ${canAI ? '' : 'disabled'}>
+        <button id="ask" ${canAI ? off : 'disabled'}>Tanya</button></div>
+      <div class="qa">${(qa[m.id] || []).map(x => `<div><b>${esc(x.q)}</b></div><div class="a">${esc(x.a)}</div>`).join('')}</div>
+    </div>
+
+    ${m.transcript.length ? `<details><summary>Transkrip (${m.transcript.length} segmen)</summary>${
+      m.transcript.map(s => `<div class="seg"><time>${hms(s.start)}</time><span>${esc(s.text)}</span></div>`).join('')}</details>` : ''}`;
+
+  const refresh = () => { lastDetailKey = ''; poll(); };
+  const run = async (kind, fn) => {
+    busyAction = kind; refresh();
+    try { await fn(); } catch (e) { alert(e.message); }
+    busyAction = ''; refresh();
+  };
+  const post = (url, body) => api(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+
+  const t = $('detail').querySelector('.title');
+  t.onchange = () => api('/api/meetings/' + m.id, {method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify({title: t.value})}).then(poll);
+  $('copy').onclick = () => navigator.clipboard.writeText(cur.text);
+  $('retry').onclick = () => api('/api/meetings/' + m.id + '/retry', {method:'POST'}).then(poll).catch(e => alert(e.message));
+  $('del').onclick = () => { if (confirm('Hapus meeting ini beserta audionya?')) api('/api/meetings/' + m.id, {method:'DELETE'}).then(() => { selected = null; $('detail').innerHTML = ''; poll(); }); };
+  $('delver').onclick = () => { if (confirm('Hapus versi ringkasan ini?')) api(`/api/meetings/${m.id}/summaries/${cur.id}`, {method:'DELETE'}).then(() => { delete sel[m.id]; refresh(); }); };
+  $('detail').querySelectorAll('.tab').forEach(b => b.onclick = () => { sel[m.id] = +b.dataset.sid; refresh(); });
+  $('detail').querySelectorAll('.tpl').forEach(b => b.onclick = () => run('sum', async () => {
+    const r = await post(`/api/meetings/${m.id}/summaries`, {template: b.dataset.k, instruction: $('instr').value});
+    sel[m.id] = r.id;
+  }));
+  const ask = () => { const q = $('q').value.trim(); if (q) run('ask', async () => {
+    const r = await post(`/api/meetings/${m.id}/ask`, {question: q});
+    (qa[m.id] = qa[m.id] || []).push({q, a: r.answer});
+  }); };
+  $('ask').onclick = ask;
+  $('q').onkeydown = e => { if (e.key === 'Enter') ask(); };
+}
+
+poll(); setInterval(poll, 1000);
+</script>
+</body>
+</html>
